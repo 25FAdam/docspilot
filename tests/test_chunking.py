@@ -1,6 +1,6 @@
 import pytest
 
-from app.rag.chunking import chunk_markdown
+from app.rag.chunking import ChunkingError, chunk_markdown
 
 
 def count(s: str) -> int:
@@ -246,5 +246,5 @@ def test_guard_raises_if_a_chunk_would_exceed_max():
         # Honest while sizing; inflates only the final breadcrumb + content embedding input.
         return len(s.split()) + (1000 if s.startswith("Doc\n\n#") else 0)
 
-    with pytest.raises(ValueError, match="exceeds max_tokens"):
+    with pytest.raises(ChunkingError, match="exceeds max_tokens"):
         chunk_markdown("# Doc\n\nbody", "a.md", "u", lying_counter, 5, 50, 0.1)

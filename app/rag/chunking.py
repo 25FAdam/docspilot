@@ -32,6 +32,10 @@ CountTokens = Callable[[str], int]
 _OVERLAP_SLACK = 1.15
 
 
+class ChunkingError(RuntimeError):
+    """An internal chunking invariant was violated (a chunk exceeded max_tokens)."""
+
+
 @dataclass(frozen=True)
 class Chunk:
     source_path: str
@@ -427,7 +431,7 @@ def chunk_markdown(
                 continue
             token_count = count_tokens(f"{crumb}\n\n{content}")
             if token_count > max_tokens:  # invariant: CHUNK_MAX_TOKENS includes the breadcrumb
-                raise ValueError(
+                raise ChunkingError(
                     f"{source_path}: chunk of {token_count} tokens exceeds max_tokens={max_tokens}"
                 )
             chunks.append(

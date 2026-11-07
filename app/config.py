@@ -40,6 +40,7 @@ class Settings(BaseSettings):
     # HTTP
     http_timeout_seconds: float = Field(30, gt=0)
     http_max_retries: int = Field(5, ge=0)
+    http_retry_after_max_seconds: float = Field(120, gt=0)  # cap on a server's Retry-After
 
     @model_validator(mode="after")
     def _check_chunk_bounds(self) -> "Settings":

@@ -108,6 +108,7 @@ def test_listing_follows_link_header_and_filters():
             "main",
             "content/handbook/a",
             max_retries=1,
+            retry_after_max=120.0,
             sleep=no_sleep,
         )
     assert len(files) == 250
@@ -176,7 +177,9 @@ def test_files_written_under_raw_dir_and_existing_skipped(tmp_path):
         second = download_handbook(settings, client=client, sleep=no_sleep)
         third = download_handbook(settings, client=client, refresh=True, sleep=no_sleep)
     raw = tmp_path / "raw"
-    assert (raw / "content/handbook/a/_index.md").read_text() == "# content/handbook/a/_index.md\n"
+    assert (raw / "content/handbook/a/_index.md").read_text(
+        encoding="utf-8"
+    ) == "# content/handbook/a/_index.md\n"
     assert (raw / "content/handbook/a/sub/page.md").exists()
     assert not list(raw.rglob("*.part"))
     assert (first.fetched, first.skipped_existing) == (2, 0)
@@ -216,7 +219,13 @@ def test_429_then_200_honours_retry_after():
 
     sleeps = []
     with httpx.Client(transport=httpx.MockTransport(handler)) as client:
-        response = _get(client, "https://gitlab.com/x", max_retries=3, sleep=sleeps.append)
+        response = _get(
+            client,
+            "https://gitlab.com/x",
+            max_retries=3,
+            retry_after_max=120.0,
+            sleep=sleeps.append,
+        )
     assert response.text == "ok"
     assert sleeps == [7.0]
 
@@ -229,7 +238,13 @@ def test_backoff_grows_exponentially_with_jitter():
 
     sleeps = []
     with httpx.Client(transport=httpx.MockTransport(handler)) as client:
-        _get(client, "https://gitlab.com/x", max_retries=5, sleep=sleeps.append)
+        _get(
+            client,
+            "https://gitlab.com/x",
+            max_retries=5,
+            retry_after_max=120.0,
+            sleep=sleeps.append,
+        )
     assert len(sleeps) == 3
     for attempt, delay in enumerate(sleeps):
         assert 2**attempt <= delay < 2**attempt + 1
@@ -246,7 +261,13 @@ def test_gives_up_after_max_retries():
     sleeps = []
     client = httpx.Client(transport=httpx.MockTransport(handler))
     with client, pytest.raises(DownloadError, match="429"):
-        _get(client, "https://gitlab.com/x", max_retries=2, sleep=sleeps.append)
+        _get(
+            client,
+            "https://gitlab.com/x",
+            max_retries=2,
+            retry_after_max=120.0,
+            sleep=sleeps.append,
+        )
     assert len(calls) == 3  # first try + 2 retries
     assert len(sleeps) == 2
 
@@ -260,7 +281,7 @@ def test_non_retryable_error_fails_immediately():
 
     client = httpx.Client(transport=httpx.MockTransport(handler))
     with client, pytest.raises(DownloadError, match="404"):
-        _get(client, "https://gitlab.com/x", max_retries=3, sleep=no_sleep)
+        _get(client, "https://gitlab.com/x", max_retries=3, retry_after_max=120.0, sleep=no_sleep)
     assert len(calls) == 1
 
 
@@ -274,7 +295,12 @@ def test_transport_errors_are_retried():
         return httpx.Response(200, text="ok")
 
     with httpx.Client(transport=httpx.MockTransport(handler)) as client:
-        assert _get(client, "https://gitlab.com/x", max_retries=3, sleep=no_sleep).text == "ok"
+        assert (
+            _get(
+                client, "https://gitlab.com/x", max_retries=3, retry_after_max=120.0, sleep=no_sleep
+            ).text
+            == "ok"
+        )
 
 
 def test_make_client_does_not_connect():
@@ -302,14 +328,14 @@ def test_read_manifest_missing_stale_corrupt_or_unsafe(tmp_path):
     write_manifest(raw, ["p"], ["p/a.md"])
     assert read_manifest(raw, ["p"]) == ["p/a.md"]
     assert read_manifest(raw, ["other"]) is None  # written for different paths
-    (raw / "selected.json").write_text("{not json")
+    (raw / "selected.json").write_text("{not json", encoding="utf-8")
     assert read_manifest(raw, ["p"]) is None
     write_manifest(raw, ["p"], ["../evil.md"])
     with pytest.raises(DownloadError):
         read_manifest(raw, ["p"])
 
 
-def test_retry_after_is_clamped():
+def test_retry_after_is_clamped_to_the_configured_maximum():
     statuses = iter([429, 200])
 
     def handler(request):
@@ -317,7 +343,34 @@ def test_retry_after_is_clamped():
         headers = {"Retry-After": "86400"} if status == 429 else {}
         return httpx.Response(status, headers=headers)
 
+    cap = make_settings(Path(".")).http_retry_after_max_seconds
     sleeps = []
     with httpx.Client(transport=httpx.MockTransport(handler)) as client:
-        _get(client, "https://gitlab.com/x", max_retries=2, sleep=sleeps.append)
-    assert sleeps == [download._MAX_RETRY_AFTER_SECONDS]
+        _get(
+            client,
+            "https://gitlab.com/x",
+            max_retries=2,
+            retry_after_max=cap,
+            sleep=sleeps.append,
+        )
+    assert sleeps == [cap]
+
+
+def test_read_manifest_drops_entries_outside_configured_paths(tmp_path):
+    raw = tmp_path / "raw"
+    write_manifest(
+        raw,
+        ["content/a", "content/b/c.md"],
+        [
+            "content/a/x.md",
+            "content/a/sub/y.md",
+            "content/b/c.md",
+            "README.md",
+            "content/ab/z.md",  # shares a string prefix with content/a but is a different directory
+        ],
+    )
+    assert read_manifest(raw, ["content/a", "content/b/c.md"]) == [
+        "content/a/x.md",
+        "content/a/sub/y.md",
+        "content/b/c.md",
+    ]

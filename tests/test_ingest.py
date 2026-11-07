@@ -2,6 +2,7 @@ import pytest
 
 from app.config import Settings
 from app.rag import db, ingest
+from app.rag.chunking import ChunkingError
 from app.rag.download import DownloadError, write_manifest
 from app.rag.embeddings import EmbeddingError
 from app.rag.ingest import IngestError, compute_fingerprint, top_level_section
@@ -362,7 +363,7 @@ def test_manifest_entries_missing_on_disk_are_skipped(corpus, store):
 def test_tampered_manifest_cannot_escape_raw_dir(corpus, store):
     settings = make_settings(corpus)
     select(corpus, settings, ["../../secret.md"])
-    with pytest.raises(DownloadError):
+    with pytest.raises(IngestError, match="invalid manifest"):
         do_run(settings, store)
 
 
@@ -371,6 +372,31 @@ def test_main_returns_nonzero_on_embedding_failure(corpus, monkeypatch):
 
     def boom(*a, **k):
         raise EmbeddingError("cannot load tokenizer")
+
+    monkeypatch.setattr(ingest, "run", boom)
+    assert ingest.main([]) == 1
+
+
+def test_main_reports_invalid_manifest_distinctly(corpus, store, monkeypatch, caplog):
+    settings = make_settings(corpus)
+    select(corpus, settings, ["../../secret.md"])
+    monkeypatch.setattr(ingest, "get_settings", lambda: settings)
+    real_run = ingest.run
+    monkeypatch.setattr(
+        ingest,
+        "run",
+        lambda s, **kw: real_run(s, conn=object(), embed=FakeEmbedder(), count_tokens=count, **kw),
+    )
+    assert ingest.main(["--skip-download"]) == 1
+    assert "invalid manifest" in caplog.text
+    assert "download failed" not in caplog.text
+
+
+def test_main_returns_nonzero_on_chunking_invariant_failure(corpus, monkeypatch):
+    monkeypatch.setattr(ingest, "get_settings", lambda: make_settings(corpus))
+
+    def boom(*a, **k):
+        raise ChunkingError("chunk exceeds max_tokens")
 
     monkeypatch.setattr(ingest, "run", boom)
     assert ingest.main([]) == 1

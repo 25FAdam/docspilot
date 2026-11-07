@@ -20,6 +20,7 @@ NEW_ENV_VARS = [
     "CHUNK_OVERLAP_RATIO",
     "HTTP_TIMEOUT_SECONDS",
     "HTTP_MAX_RETRIES",
+    "HTTP_RETRY_AFTER_MAX_SECONDS",
 ]
 
 
@@ -47,6 +48,7 @@ def test_ingest_defaults(clean_env):
     assert (s.chunk_min_tokens, s.chunk_max_tokens, s.chunk_overlap_ratio) == (200, 500, 0.12)
     assert s.http_timeout_seconds == 30
     assert s.http_max_retries == 5
+    assert s.http_retry_after_max_seconds == 120
 
 
 def test_ingest_env_overrides(clean_env):

@@ -26,7 +26,6 @@ log = logging.getLogger(__name__)
 GITLAB_URL = "https://gitlab.com"
 _RETRY_STATUSES = frozenset({429, 500, 502, 503, 504})
 _PAGE_SIZE = 100
-_MAX_RETRY_AFTER_SECONDS = 120.0  # never sleep longer than this, whatever the server asks
 
 # Written to RAW_DATA_DIR after a download: the selected repo paths. Ingest treats it as the
 # source of truth for which files belong to the knowledge base (see read_manifest).
@@ -52,12 +51,12 @@ def make_client(settings: Settings) -> httpx.Client:
     )
 
 
-def _retry_after_seconds(response: httpx.Response) -> float | None:
+def _retry_after_seconds(response: httpx.Response, max_seconds: float) -> float | None:
     value = response.headers.get("Retry-After")
     if value is None:
         return None
     try:
-        return min(max(0.0, float(value)), _MAX_RETRY_AFTER_SECONDS)
+        return min(max(0.0, float(value)), max_seconds)
     except ValueError:
         return None  # HTTP-date form is not worth parsing; fall back to backoff
 
@@ -67,12 +66,13 @@ def _get(
     url: str,
     *,
     max_retries: int,
+    retry_after_max: float,
     params: dict[str, str | int | bool] | None = None,
     sleep: Callable[[float], None] = time.sleep,
 ) -> httpx.Response:
     """GET with retries on 429/5xx/transport errors: exponential backoff (2**attempt) + jitter.
 
-    A Retry-After header, when present, replaces the computed delay.
+    A Retry-After header, when present, replaces the computed delay (capped at retry_after_max).
     """
     for attempt in range(max_retries + 1):
         delay = 2.0**attempt + random.uniform(0, 1)
@@ -95,7 +95,7 @@ def _get(
                 f"GET {url} still returning HTTP {response.status_code} "
                 f"after {attempt + 1} attempts"
             )
-        retry_after = _retry_after_seconds(response)
+        retry_after = _retry_after_seconds(response, retry_after_max)
         if retry_after is not None:
             delay = retry_after
         log.warning("GET %s returned %s; retrying in %.1fs", url, response.status_code, delay)
@@ -129,6 +129,7 @@ def list_markdown_files(
     path: str,
     *,
     max_retries: int,
+    retry_after_max: float,
     sleep: Callable[[float], None] = time.sleep,
 ) -> list[str]:
     """All .md blobs under `path` (recursive), sorted by path. Follows Link: rel=next."""
@@ -141,7 +142,14 @@ def list_markdown_files(
     }
     found: list[str] = []
     while url:
-        response = _get(client, url, max_retries=max_retries, params=params, sleep=sleep)
+        response = _get(
+            client,
+            url,
+            max_retries=max_retries,
+            retry_after_max=retry_after_max,
+            params=params,
+            sleep=sleep,
+        )
         for entry in response.json():
             if entry.get("type") == "blob" and entry.get("path", "").endswith(".md"):
                 found.append(entry["path"])
@@ -187,7 +195,9 @@ def write_manifest(raw_dir: Path, paths: Sequence[str], selected: Sequence[str])
     """Record the selection (and the configured paths it came from) next to the raw files."""
     raw_dir.mkdir(parents=True, exist_ok=True)
     tmp = raw_dir / (MANIFEST_NAME + ".part")
-    tmp.write_text(json.dumps({"paths": list(paths), "files": list(selected)}, indent=1))
+    tmp.write_text(
+        json.dumps({"paths": list(paths), "files": list(selected)}, indent=1), encoding="utf-8"
+    )
     os.replace(tmp, raw_dir / MANIFEST_NAME)
 
 
@@ -195,13 +205,14 @@ def read_manifest(raw_dir: Path, paths: Sequence[str]) -> list[str] | None:
     """Selected repo paths, or None if there is no usable manifest.
 
     A manifest written for different HANDBOOK_PATHS is stale and ignored. Every entry is
-    validated like a download path, so a tampered manifest cannot point outside raw_dir.
+    validated like a download path (a tampered manifest cannot point outside raw_dir, and raises
+    DownloadError), then entries that are not under a configured path are dropped with a warning.
     """
     manifest = raw_dir / MANIFEST_NAME
     if not manifest.is_file():
         return None
     try:
-        data = json.loads(manifest.read_text())
+        data = json.loads(manifest.read_text(encoding="utf-8"))
         files = [str(f) for f in data["files"]]
         recorded = list(data["paths"])
     except (OSError, ValueError, KeyError, TypeError):
@@ -212,7 +223,12 @@ def read_manifest(raw_dir: Path, paths: Sequence[str]) -> list[str] | None:
         return None
     for f in files:
         safe_destination(raw_dir, f)
-    return files
+    kept = [f for f in files if any(f == p or f.startswith(p.rstrip("/") + "/") for p in paths)]
+    if len(kept) != len(files):
+        log.warning(
+            "manifest lists %d files outside HANDBOOK_PATHS; ignoring them", len(files) - len(kept)
+        )
+    return kept
 
 
 def safe_destination(raw_dir: Path, repo_path: str) -> Path:
@@ -239,6 +255,7 @@ def download_handbook(
     client = client or make_client(settings)
     raw_dir = Path(settings.raw_data_dir)
     retries = settings.http_max_retries
+    retry_after_max = settings.http_retry_after_max_seconds
     try:
         candidates = [
             list_markdown_files(
@@ -247,6 +264,7 @@ def download_handbook(
                 settings.handbook_ref,
                 p,
                 max_retries=retries,
+                retry_after_max=retry_after_max,
                 sleep=sleep,
             )
             for p in settings.handbook_path_list
@@ -264,7 +282,9 @@ def download_handbook(
                 f"{GITLAB_URL}/{settings.handbook_project}/-/raw/"
                 f"{quote(settings.handbook_ref, safe='/')}/{quote(repo_path, safe='/')}"
             )
-            response = _get(client, raw_url, max_retries=retries, sleep=sleep)
+            response = _get(
+                client, raw_url, max_retries=retries, retry_after_max=retry_after_max, sleep=sleep
+            )
             dest.parent.mkdir(parents=True, exist_ok=True)
             tmp = dest.with_name(dest.name + ".part")
             tmp.write_bytes(response.content)

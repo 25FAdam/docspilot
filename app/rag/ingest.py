@@ -21,7 +21,7 @@ import psycopg
 
 from app.config import Settings, get_settings
 from app.rag import db
-from app.rag.chunking import chunk_markdown
+from app.rag.chunking import ChunkingError, chunk_markdown
 from app.rag.download import (
     DownloadError,
     download_handbook,
@@ -136,7 +136,10 @@ def select_ingest_files(settings: Settings, raw_dir: Path) -> list[str]:
     but missing on disk are skipped with a warning.
     """
     paths = settings.handbook_path_list
-    manifest = read_manifest(raw_dir, paths)
+    try:
+        manifest = read_manifest(raw_dir, paths)
+    except DownloadError as exc:
+        raise IngestError(f"invalid manifest in {raw_dir}: {exc}") from exc
     if manifest is None:
         per_path = [discover_files(raw_dir, [p]) for p in paths]
         return sorted(select_files(per_path, settings.handbook_max_files_total))
@@ -302,7 +305,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     except psycopg.Error as exc:
         log.error("database error: %s", str(exc).strip())
         return 1
-    except (IngestError, EmbeddingError) as exc:
+    except (IngestError, EmbeddingError, ChunkingError) as exc:
         log.error("%s", exc)
         return 1
     print(summary.format())
