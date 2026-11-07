@@ -7,6 +7,7 @@ files, so only the selected files are transferred.
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import random
@@ -25,6 +26,11 @@ log = logging.getLogger(__name__)
 GITLAB_URL = "https://gitlab.com"
 _RETRY_STATUSES = frozenset({429, 500, 502, 503, 504})
 _PAGE_SIZE = 100
+_MAX_RETRY_AFTER_SECONDS = 120.0  # never sleep longer than this, whatever the server asks
+
+# Written to RAW_DATA_DIR after a download: the selected repo paths. Ingest treats it as the
+# source of truth for which files belong to the knowledge base (see read_manifest).
+MANIFEST_NAME = "selected.json"
 
 
 class DownloadError(RuntimeError):
@@ -51,7 +57,7 @@ def _retry_after_seconds(response: httpx.Response) -> float | None:
     if value is None:
         return None
     try:
-        return max(0.0, float(value))
+        return min(max(0.0, float(value)), _MAX_RETRY_AFTER_SECONDS)
     except ValueError:
         return None  # HTTP-date form is not worth parsing; fall back to backoff
 
@@ -177,6 +183,38 @@ def select_files(candidates: Sequence[Sequence[str]], max_total: int) -> list[st
     return [p for group in taken for p in group]
 
 
+def write_manifest(raw_dir: Path, paths: Sequence[str], selected: Sequence[str]) -> None:
+    """Record the selection (and the configured paths it came from) next to the raw files."""
+    raw_dir.mkdir(parents=True, exist_ok=True)
+    tmp = raw_dir / (MANIFEST_NAME + ".part")
+    tmp.write_text(json.dumps({"paths": list(paths), "files": list(selected)}, indent=1))
+    os.replace(tmp, raw_dir / MANIFEST_NAME)
+
+
+def read_manifest(raw_dir: Path, paths: Sequence[str]) -> list[str] | None:
+    """Selected repo paths, or None if there is no usable manifest.
+
+    A manifest written for different HANDBOOK_PATHS is stale and ignored. Every entry is
+    validated like a download path, so a tampered manifest cannot point outside raw_dir.
+    """
+    manifest = raw_dir / MANIFEST_NAME
+    if not manifest.is_file():
+        return None
+    try:
+        data = json.loads(manifest.read_text())
+        files = [str(f) for f in data["files"]]
+        recorded = list(data["paths"])
+    except (OSError, ValueError, KeyError, TypeError):
+        log.warning("ignoring unreadable manifest %s", manifest)
+        return None
+    if recorded != list(paths):
+        log.warning("manifest %s was written for different HANDBOOK_PATHS; ignoring it", manifest)
+        return None
+    for f in files:
+        safe_destination(raw_dir, f)
+    return files
+
+
 def safe_destination(raw_dir: Path, repo_path: str) -> Path:
     """Destination for a repo path, guaranteed to be inside raw_dir."""
     posix = PurePosixPath(repo_path.replace("\\", "/"))
@@ -235,6 +273,7 @@ def download_handbook(
         log.info(
             "download: %d selected, %d fetched, %d already present", len(selected), fetched, skipped
         )
+        write_manifest(raw_dir, settings.handbook_path_list, selected)
         return DownloadSummary(selected=selected, fetched=fetched, skipped_existing=skipped)
     finally:
         if owns_client:

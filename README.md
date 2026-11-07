@@ -29,6 +29,12 @@ docker compose up -d db
 uv run python -m app.rag.ingest   # first run also downloads the embedding model
 ```
 
+The download writes the capped selection to `data/raw/selected.json`; ingest and `--prune` use
+that list as the source of truth, so leftover files from an earlier run with a larger cap are
+ignored (and `--prune` removes their rows). With `--skip-download` and no matching manifest,
+ingest lists the `.md` files on disk under `HANDBOOK_PATHS` and applies the same
+`HANDBOOK_MAX_FILES_TOTAL` cap.
+
 Re-running only re-embeds changed files. Options: `--skip-download`, `--refresh`, `--reset`,
 `--prune`. Which paths and how many files are controlled by `HANDBOOK_PATHS` and
 `HANDBOOK_MAX_FILES_TOTAL` (see `.env.example`).

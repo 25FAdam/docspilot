@@ -10,9 +10,11 @@ from app.rag.download import (
     _get,
     download_handbook,
     list_markdown_files,
+    read_manifest,
     safe_destination,
     select_files,
     source_url,
+    write_manifest,
 )
 
 TREE = "https://gitlab.com/api/v4/projects/gitlab-com%2Fcontent-sites%2Fhandbook/repository/tree"
@@ -278,3 +280,44 @@ def test_transport_errors_are_retried():
 def test_make_client_does_not_connect():
     client = download.make_client(make_settings(Path(".")))
     client.close()
+
+
+# --- manifest, Retry-After clamp ---------------------------------------------------------------
+
+
+def test_download_writes_manifest_with_selection(tmp_path):
+    entries = [blob(f"content/handbook/a/f{i}.md") for i in range(4)]
+    fake = FakeGitlab({"content/handbook/a": entries})
+    settings = make_settings(tmp_path, handbook_max_files_total=2)
+    with fake.client() as client:
+        summary = download_handbook(settings, client=client, sleep=no_sleep)
+    raw = tmp_path / "raw"
+    assert read_manifest(raw, settings.handbook_path_list) == summary.selected
+    assert len(summary.selected) == 2
+
+
+def test_read_manifest_missing_stale_corrupt_or_unsafe(tmp_path):
+    raw = tmp_path / "raw"
+    assert read_manifest(raw, ["p"]) is None
+    write_manifest(raw, ["p"], ["p/a.md"])
+    assert read_manifest(raw, ["p"]) == ["p/a.md"]
+    assert read_manifest(raw, ["other"]) is None  # written for different paths
+    (raw / "selected.json").write_text("{not json")
+    assert read_manifest(raw, ["p"]) is None
+    write_manifest(raw, ["p"], ["../evil.md"])
+    with pytest.raises(DownloadError):
+        read_manifest(raw, ["p"])
+
+
+def test_retry_after_is_clamped():
+    statuses = iter([429, 200])
+
+    def handler(request):
+        status = next(statuses)
+        headers = {"Retry-After": "86400"} if status == 429 else {}
+        return httpx.Response(status, headers=headers)
+
+    sleeps = []
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        _get(client, "https://gitlab.com/x", max_retries=2, sleep=sleeps.append)
+    assert sleeps == [download._MAX_RETRY_AFTER_SECONDS]

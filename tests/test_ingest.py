@@ -2,7 +2,8 @@ import pytest
 
 from app.config import Settings
 from app.rag import db, ingest
-from app.rag.download import DownloadError
+from app.rag.download import DownloadError, write_manifest
+from app.rag.embeddings import EmbeddingError
 from app.rag.ingest import IngestError, compute_fingerprint, top_level_section
 
 DIM = 4
@@ -304,6 +305,72 @@ def test_main_returns_nonzero_on_download_failure(corpus, monkeypatch):
 
     def boom(*a, **k):
         raise DownloadError("gitlab unreachable")
+
+    monkeypatch.setattr(ingest, "run", boom)
+    assert ingest.main([]) == 1
+
+
+# --- selection / manifest -----------------------------------------------------------------
+
+A = "content/handbook/engineering/a.md"
+B = "content/handbook/engineering/deep/b.md"
+C = "content/handbook/people-group/c.md"
+
+
+def select(tmp_path, settings, files):
+    write_manifest(tmp_path / "raw", settings.handbook_path_list, files)
+
+
+def test_file_on_disk_outside_manifest_is_not_ingested(corpus, store):
+    settings = make_settings(corpus)
+    select(corpus, settings, [A, C])
+    summary = do_run(settings, store)
+    assert summary.seen == 2
+    assert set(store.docs) == {A, C}
+
+
+def test_prune_removes_rows_of_files_that_left_the_selection(corpus, store):
+    settings = make_settings(corpus)
+    do_run(settings, store)  # no manifest: everything on disk (under the cap) is selected
+    assert set(store.docs) == {A, B, C}
+    select(corpus, settings, [A, C])  # e.g. the cap was lowered and a new download ran
+    do_run(settings, store)
+    assert B in store.docs  # not pruned unless asked
+    summary = do_run(settings, store, prune=True)
+    assert set(store.docs) == {A, C}
+    assert summary.pruned == 1
+
+
+def test_without_manifest_the_cap_is_applied_to_files_on_disk(corpus, store):
+    summary = do_run(make_settings(corpus, handbook_max_files_total=2), store)
+    assert summary.seen == 2
+    assert len(store.docs) == 2
+
+
+def test_stale_manifest_for_other_paths_is_ignored(corpus, store):
+    settings = make_settings(corpus)
+    write_manifest(corpus / "raw", ["content/handbook/other"], [A])
+    assert do_run(settings, store).seen == 3  # fell back to the on-disk listing
+
+
+def test_manifest_entries_missing_on_disk_are_skipped(corpus, store):
+    settings = make_settings(corpus)
+    select(corpus, settings, [A, "content/handbook/engineering/gone.md"])
+    assert do_run(settings, store).seen == 1
+
+
+def test_tampered_manifest_cannot_escape_raw_dir(corpus, store):
+    settings = make_settings(corpus)
+    select(corpus, settings, ["../../secret.md"])
+    with pytest.raises(DownloadError):
+        do_run(settings, store)
+
+
+def test_main_returns_nonzero_on_embedding_failure(corpus, monkeypatch):
+    monkeypatch.setattr(ingest, "get_settings", lambda: make_settings(corpus))
+
+    def boom(*a, **k):
+        raise EmbeddingError("cannot load tokenizer")
 
     monkeypatch.setattr(ingest, "run", boom)
     assert ingest.main([]) == 1

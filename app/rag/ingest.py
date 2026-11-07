@@ -22,7 +22,14 @@ import psycopg
 from app.config import Settings, get_settings
 from app.rag import db
 from app.rag.chunking import chunk_markdown
-from app.rag.download import DownloadError, download_handbook, source_url
+from app.rag.download import (
+    DownloadError,
+    download_handbook,
+    read_manifest,
+    select_files,
+    source_url,
+)
+from app.rag.embeddings import EmbeddingError
 
 log = logging.getLogger(__name__)
 
@@ -118,6 +125,27 @@ def discover_files(raw_dir: Path, paths: Sequence[str]) -> list[str]:
     return sorted(found)
 
 
+def select_ingest_files(settings: Settings, raw_dir: Path) -> list[str]:
+    """The files that belong to the knowledge base for this run.
+
+    Source of truth is the manifest written by the last download (the capped selection), so
+    leftovers from an earlier run with a larger cap or other paths are neither ingested nor kept
+    by --prune. Without a usable manifest (e.g. --skip-download on hand-placed files) the files
+    on disk under HANDBOOK_PATHS are listed per path and the same cap is applied with
+    select_files, so HANDBOOK_MAX_FILES_TOTAL is always honoured. Files named by the manifest
+    but missing on disk are skipped with a warning.
+    """
+    paths = settings.handbook_path_list
+    manifest = read_manifest(raw_dir, paths)
+    if manifest is None:
+        per_path = [discover_files(raw_dir, [p]) for p in paths]
+        return sorted(select_files(per_path, settings.handbook_max_files_total))
+    present = [f for f in manifest if (raw_dir / f).is_file()]
+    if len(present) != len(manifest):
+        log.warning("%d files in the manifest are missing on disk", len(manifest) - len(present))
+    return sorted(set(present))
+
+
 def _embed_in_batches(
     texts: Sequence[str], embed: Embedder, batch_size: int, dim: int
 ) -> list[list[float]]:
@@ -167,7 +195,7 @@ def run(
         count_tokens = get_token_counter(settings.embedding_model)
 
     raw_dir = Path(settings.raw_data_dir)
-    files = discover_files(raw_dir, settings.handbook_path_list)
+    files = select_ingest_files(settings, raw_dir)
     if not files:
         raise IngestError(
             f"no .md files found under {raw_dir} for HANDBOOK_PATHS="
@@ -244,7 +272,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--prune",
         action="store_true",
-        help="delete DB rows for source files no longer in the selected set",
+        help="delete DB rows for source files outside the current selection (download manifest)",
     )
     return p
 
@@ -274,7 +302,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     except psycopg.Error as exc:
         log.error("database error: %s", str(exc).strip())
         return 1
-    except IngestError as exc:
+    except (IngestError, EmbeddingError) as exc:
         log.error("%s", exc)
         return 1
     print(summary.format())
