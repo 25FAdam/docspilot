@@ -1,0 +1,26 @@
+[project]
+name = "docspilot"
+version = "0.1.0"
+description = "RAG-based internal knowledge-base chatbot"
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+dependencies = ["pydantic-settings"]
+
+[dependency-groups]
+dev = ["pytest", "ruff"]
+
+[tool.uv]
+package = false
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+addopts = "-m 'not live'"
+markers = ["live: calls the real Gemini API; excluded by default"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
