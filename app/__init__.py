@@ -1,0 +1,1 @@
+"""DocsPilot application package."""
