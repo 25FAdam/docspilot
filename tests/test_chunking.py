@@ -1,3 +1,5 @@
+import pytest
+
 from app.rag.chunking import chunk_markdown
 
 
@@ -211,3 +213,38 @@ def test_crlf_input_is_normalised():
 def test_token_count_covers_breadcrumb_and_content():
     c = run("# Title\n\nsome body words")[0]
     assert c.token_count == count(f"{c.section}\n\n{c.content}")
+
+
+def test_very_long_heading_is_clipped_and_never_exceeds_max():
+    long_title = words(90, "t")
+    chunks = run(f"# {long_title}\n\n## Sub\n{words(150, 'b')}", 20, 100)
+    assert chunks
+    for c in chunks:
+        assert c.token_count <= 100
+        assert count(c.section + "\n\n") <= 50  # breadcrumb limited to max // 2
+        assert c.token_count == count(f"{c.section}\n\n{c.content}")  # stored == embedded
+
+
+def test_clipping_drops_outermost_parts_first_and_keeps_deepest():
+    text = f"---\ntitle: {words(30, 'root')}\n---\n## {words(30, 'mid')}\n\n### Leaf\n{words(60)}"
+    chunks = run(text, 5, 80)
+    deepest = [c for c in chunks if c.section.endswith("Leaf")]
+    assert deepest
+    assert all("root0" not in c.section for c in deepest)
+    assert all(c.token_count <= 80 for c in chunks)
+
+
+def test_single_giant_heading_is_truncated_to_its_first_words():
+    chunks = run(f"# {words(300, 'h')}\n\ntext body here", 5, 40)
+    assert chunks
+    assert all(c.token_count <= 40 for c in chunks)
+    assert chunks[0].section.startswith("h0 h1")
+
+
+def test_guard_raises_if_a_chunk_would_exceed_max():
+    def lying_counter(s):
+        # Honest while sizing; inflates only the final breadcrumb + content embedding input.
+        return len(s.split()) + (1000 if s.startswith("Doc\n\n#") else 0)
+
+    with pytest.raises(ValueError, match="exceeds max_tokens"):
+        chunk_markdown("# Doc\n\nbody", "a.md", "u", lying_counter, 5, 50, 0.1)

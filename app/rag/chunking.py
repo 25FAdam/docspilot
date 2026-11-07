@@ -158,12 +158,23 @@ def _parse_sections(body: str) -> tuple[list[tuple[tuple[str, ...], str]], str]:
     return sections, first_h1
 
 
-def _breadcrumb(root: str, path: tuple[str, ...]) -> str:
+def _breadcrumb(root: str, path: tuple[str, ...], limit: int, count: CountTokens) -> str:
+    """`Title > H2 > H3`, clipped so that breadcrumb + "\n\n" is at most `limit` tokens.
+
+    Clipping drops the leading (outermost) parts first, keeping the most specific ones; if the
+    last part alone is still too long it is cut to its first words. The clipped string is what
+    gets stored in `section` and embedded, so the two always match.
+    """
     parts: list[str] = []
     for part in (root, *path):
         if not parts or parts[-1].casefold() != part.casefold():
             parts.append(part)
-    return " > ".join(parts)
+    while len(parts) > 1 and count(" > ".join(parts) + "\n\n") > limit:
+        parts.pop(0)
+    crumb = " > ".join(parts)
+    if count(crumb + "\n\n") > limit:
+        crumb = (_hard_split(crumb, max(limit, 1), count) or [crumb[:1]])[0]
+    return crumb
 
 
 # ---------------------------------------------------------------------------
@@ -372,18 +383,26 @@ def chunk_markdown(
         return []
     root = title or first_h1 or _fallback_title(source_path)
 
+    # Breadcrumbs are clipped to half the budget, so the body always keeps at least half and
+    # breadcrumb + body never exceeds max_tokens.
+    crumb_limit = max(max_tokens // 2, 1)
+
     def budget_for(crumb: str) -> int:
-        # A pathological breadcrumb must not starve the body completely.
-        return max(max_tokens - count_tokens(crumb + "\n\n"), max_tokens // 4, 1)
+        return max(max_tokens - count_tokens(crumb + "\n\n"), 1)
 
     # (breadcrumb, body, tokens)
     merged: list[tuple[str, str, int]] = []
-    items = [(_breadcrumb(root, path), sec, count_tokens(sec)) for path, sec in raw_sections]
+    items = [
+        (_breadcrumb(root, path, crumb_limit, count_tokens), sec, count_tokens(sec))
+        for path, sec in raw_sections
+    ]
     i = 0
     while i < len(items):
         crumb, sec, tokens = items[i]
         i += 1
         budget = budget_for(crumb)
+        # Merge forward: the merged chunk keeps only the first section's breadcrumb; later
+        # sections stay identifiable through their heading lines in the body.
         while tokens < min_tokens and i < len(items) and tokens + items[i][2] <= budget:
             sec = sec + "\n\n" + items[i][1]
             tokens += items[i][2]
@@ -406,6 +425,11 @@ def chunk_markdown(
             content = content.strip()
             if not content:
                 continue
+            token_count = count_tokens(f"{crumb}\n\n{content}")
+            if token_count > max_tokens:  # invariant: CHUNK_MAX_TOKENS includes the breadcrumb
+                raise ValueError(
+                    f"{source_path}: chunk of {token_count} tokens exceeds max_tokens={max_tokens}"
+                )
             chunks.append(
                 Chunk(
                     source_path=source_path,
@@ -413,7 +437,7 @@ def chunk_markdown(
                     section=crumb,
                     url=url,
                     content=content,
-                    token_count=count_tokens(f"{crumb}\n\n{content}"),
+                    token_count=token_count,
                 )
             )
     return chunks
