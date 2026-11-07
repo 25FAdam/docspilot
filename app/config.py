@@ -10,7 +10,7 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
     google_api_key: SecretStr = SecretStr("")
-    database_url: str = "postgresql://docspilot:docspilot@localhost:5432/docspilot"
+    database_url: str = "postgresql://docspilot:docspilot@127.0.0.1:5432/docspilot"
     router_model: str = "gemini-2.5-flash-lite"
     synth_model: str = "gemini-2.5-flash"
     retrieval_threshold: float = Field(0.35, ge=0, le=1)
