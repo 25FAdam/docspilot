@@ -5,7 +5,11 @@ description = "RAG knowledge-base chatbot: LangGraph + Gemini + MCP + Streamlit"
 readme = "README.md"
 requires-python = ">=3.12,<3.13"
 dependencies = [
+    "fastembed>=0.4",
+    "httpx>=0.27",
+    "psycopg[binary]>=3.2",
     "pydantic-settings>=2.6",
+    "tokenizers>=0.20",
 ]
 
 [dependency-groups]
